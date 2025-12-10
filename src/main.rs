@@ -44,6 +44,8 @@ struct Route {
     route_short_name: String,
     route_long_name: String,
     route_type: u8,
+    route_color: String,
+    route_text_color: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -481,8 +483,22 @@ fn parse_mca<R: Read>(
                             .cloned()
                             .unwrap_or_else(|| format!("National Rail ({})", trip.atoc_code));
 
-                        let route_id = format!("{}_{}", trip.atoc_code, trip.origin_name);
-                        let route_name = format!("{} to {}", trip.origin_name, trip.dest_name);
+                        let mut route_id = format!("{}_{}", trip.atoc_code, trip.origin_name);
+                        let mut route_name = format!("{} to {}", trip.origin_name, trip.dest_name);
+                        let mut route_short_name = trip.atoc_code.clone();
+                        let mut route_color = "".to_string(); // Default (or undefined)
+                        let mut route_text_color = "000000".to_string(); // Default Black
+
+                        if trip.atoc_code == "LO" {
+                            let (name, id, color) = get_lo_line_details(&trip.stops, tiploc_map);
+                            if !name.is_empty() {
+                                route_id = id;
+                                route_name = name;
+                                route_short_name = "LO".to_string();
+                                route_color = color;
+                                route_text_color = "FFFFFF".to_string();
+                            }
+                        }
 
                         agencies_set.insert(Agency {
                             agency_id: trip.atoc_code.clone(),
@@ -494,9 +510,11 @@ fn parse_mca<R: Read>(
                         routes_map.entry(route_id.clone()).or_insert(Route {
                             route_id: route_id.clone(),
                             agency_id: trip.atoc_code.clone(),
-                            route_short_name: trip.atoc_code.clone(),
+                            route_short_name,
                             route_long_name: route_name,
                             route_type: 2,
+                            route_color,
+                            route_text_color,
                         });
 
                         trips_w.serialize(Trip {
@@ -542,4 +560,81 @@ fn format_time(raw: &str) -> String {
     } else {
         "00:00:00".to_string()
     }
+}
+
+fn get_lo_line_details(
+    stops: &[StopTime],
+    tiploc_map: &HashMap<String, ParsedStation>,
+) -> (String, String, String) {
+    let mut names: HashSet<String> = HashSet::new();
+
+    for stop in stops {
+        if let Some(station) = tiploc_map.get(&stop.stop_id) {
+            names.insert(station.name.clone());
+        }
+    }
+
+    let has = |s: &str| -> bool {
+        names
+            .iter()
+            .any(|n| n.to_uppercase().contains(&s.to_uppercase()))
+    };
+
+    if has("GOSPEL OAK") && has("BARKING") {
+        return (
+            "Suffragette Line".to_string(),
+            "LO-SUFFRAGETTE".to_string(),
+            "008163".to_string(),
+        );
+    }
+
+    if has("ROMFORD") && has("UPMINSTER") {
+        return (
+            "Liberty Line".to_string(),
+            "LO-LIBERTY".to_string(),
+            "676767".to_string(),
+        );
+    }
+
+    if has("LIVERPOOL STREET") && (has("CHESHUNT") || has("ENFIELD TOWN") || has("CHINGFORD")) {
+        return (
+            "Weaver Line".to_string(),
+            "LO-WEAVER".to_string(),
+            "a90068".to_string(),
+        );
+    }
+
+    if has("EUSTON") && has("WATFORD JUNCTION") {
+        return (
+            "Lioness Line".to_string(),
+            "LO-LIONESS".to_string(),
+            "f1b41c".to_string(),
+        );
+    }
+
+    if has("SHOREDITCH HIGH STREET") {
+        return (
+            "Windrush Line".to_string(),
+            "LO-WINDRUSH".to_string(),
+            "dc2517".to_string(),
+        );
+    }
+
+    if has("STRATFORD")
+        || (has("RICHMOND") && has("WILLESDEN JUNCTION"))
+        || has("CAMDEN ROAD")
+        || has("HACKNEY CENTRAL")
+    {
+        return (
+            "Mildmay Line".to_string(),
+            "LO-MILDMAY".to_string(),
+            "437ec1".to_string(),
+        );
+    }
+
+    (
+        "London Overground".to_string(),
+        "LO-GENERIC".to_string(),
+        "E66A1F".to_string(),
+    )
 }
