@@ -141,7 +141,7 @@ fn main() -> Result<()> {
     // 1. Authenticate
     let token = authenticate(&username, &password)?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(500))
         .build()?;
 
     let output_dir = "./gtfs_output";
@@ -177,6 +177,8 @@ fn main() -> Result<()> {
         .send()
         .context("Failed to download timetable feed")?
         .bytes()?;
+
+    println!("Downloaded Timetable Feed.");
 
     let mut tt_archive = ZipArchive::new(Cursor::new(tt_resp))?;
     let mut tiploc_map: HashMap<String, ParsedStation> = HashMap::new();
@@ -379,18 +381,18 @@ fn parse_mca<R: Read>(
             }
             "LO" => {
                 if let Some(trip) = &mut current_trip {
-                    let loc = line.get(2..10).unwrap_or("").trim();
-                    let dep = format_time(line.get(10..15).unwrap_or("00000"));
+                    let tiploc = line.get(2..9).unwrap_or("").trim();
+                    let dep_sched = format_time(line.get(10..15).unwrap_or("00000"));
 
-                    if let Some(station) = tiploc_map.get(loc) {
+                    if let Some(station) = tiploc_map.get(tiploc) {
                         trip.origin_name = station.name.clone();
                     }
 
                     trip.stops.push(StopTime {
                         trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: dep.clone(),
-                        departure_time: dep,
-                        stop_id: loc.to_string(),
+                        arrival_time: dep_sched.clone(),
+                        departure_time: dep_sched,
+                        stop_id: tiploc.to_string(),
                         stop_sequence: seq_counter,
                     });
                     seq_counter += 1;
@@ -398,15 +400,26 @@ fn parse_mca<R: Read>(
             }
             "LI" => {
                 if let Some(trip) = &mut current_trip {
-                    let loc = line.get(2..10).unwrap_or("").trim();
-                    let arr = format_time(line.get(10..15).unwrap_or("00000"));
-                    let dep = format_time(line.get(15..20).unwrap_or("00000"));
+                    let tiploc = line.get(2..9).unwrap_or("").trim();
+                    let arr_sched = format_time(line.get(10..15).unwrap_or("00000"));
+                    let dep_sched = format_time(line.get(15..20).unwrap_or("00000"));
+
+                    // Public Arrival: Pos 26-29 (Indices 25..29)
+                    let pub_arr = line.get(25..29).unwrap_or("0000");
+                    // Public Departure: Pos 30-33 (Indices 29..33)
+                    let pub_dep = line.get(29..33).unwrap_or("0000");
+
+                    // GTFS FILTER:
+                    // If both Public Arrival and Departure are 0000, it is an operational stop (passing point/junction).
+                    if pub_arr == "0000" && pub_dep == "0000" {
+                        continue;
+                    }
 
                     trip.stops.push(StopTime {
                         trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: arr,
-                        departure_time: dep,
-                        stop_id: loc.to_string(),
+                        arrival_time: arr_sched,
+                        departure_time: dep_sched,
+                        stop_id: tiploc.to_string(),
                         stop_sequence: seq_counter,
                     });
                     seq_counter += 1;
@@ -414,18 +427,18 @@ fn parse_mca<R: Read>(
             }
             "LT" => {
                 if let Some(trip) = &mut current_trip {
-                    let loc = line.get(2..10).unwrap_or("").trim();
-                    let arr = format_time(line.get(10..15).unwrap_or("00000"));
+                    let tiploc = line.get(2..9).unwrap_or("").trim();
+                    let arr_sched = format_time(line.get(10..15).unwrap_or("00000"));
 
-                    if let Some(station) = tiploc_map.get(loc) {
+                    if let Some(station) = tiploc_map.get(tiploc) {
                         trip.dest_name = station.name.clone();
                     }
 
                     trip.stops.push(StopTime {
                         trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: arr.clone(),
-                        departure_time: arr,
-                        stop_id: loc.to_string(),
+                        arrival_time: arr_sched.clone(),
+                        departure_time: arr_sched,
+                        stop_id: tiploc.to_string(),
                         stop_sequence: seq_counter,
                     });
 
@@ -462,7 +475,11 @@ fn parse_mca<R: Read>(
                     })?;
 
                     for stop in &trip.stops {
-                        st_w.serialize(stop)?;
+                        if tiploc_map.contains_key(&stop.stop_id) {
+                            st_w.serialize(stop)?;
+                        } else {
+                            println!("Missing Stop: {}", stop.stop_id);
+                        }
                     }
                 }
             }
