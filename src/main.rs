@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use csv::Writer;
 use lonlat_bng::convert_osgb36_to_ll;
+use osmpbfreader::{OsmPbfReader, objects::OsmObj};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -11,6 +12,7 @@ use zip::ZipArchive;
 const AUTH_URL: &str = "https://opendata.nationalrail.co.uk/authenticate";
 const TIMETABLE_URL: &str = "https://opendata.nationalrail.co.uk/api/staticfeeds/3.0/timetable";
 const FARES_URL: &str = "https://opendata.nationalrail.co.uk/api/staticfeeds/2.0/fares";
+const OSM_CRS_URL: &str = "https://github.com/catenarytransit/osm-filter/releases/download/latest/crs-networkrail.osm.pbf";
 
 // --- Data Structures ---
 
@@ -138,16 +140,29 @@ fn main() -> Result<()> {
     let username = std::env::var("NR_USERNAME").expect("NR_USERNAME must be set");
     let password = std::env::var("NR_PASSWORD").expect("NR_PASSWORD must be set");
 
-    // 1. Authenticate
-    let token = authenticate(&username, &password)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(500))
-        .build()?;
-
     let output_dir = "./gtfs_output";
     fs::create_dir_all(output_dir)?;
 
-    // 2. Download and Parse Fares Feed (For TOC Names)
+    // 1. Download and Parse OSM CRS Data
+    println!("Downloading OSM CRS Data from {}...", OSM_CRS_URL);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    // We save PBF to disk temporarily because OsmPbfReader prefers a File or Seekable stream
+    let pbf_path = format!("{}/stations.pbf", output_dir);
+    let mut pbf_file = File::create(&pbf_path)?;
+    let mut pbf_resp = client.get(OSM_CRS_URL).send()?;
+    pbf_resp.copy_to(&mut pbf_file)?;
+
+    println!("Parsing OSM PBF...");
+    let osm_crs_map = parse_osm_crs(&pbf_path)?;
+    println!("Loaded {} stations from OSM.", osm_crs_map.len());
+
+    // 2. Authenticate
+    let token = authenticate(&username, &password)?;
+
+    // 3. Download and Parse Fares Feed (For TOC Names)
     println!("Downloading Fares Feed from {}...", FARES_URL);
     let fares_resp = client
         .get(FARES_URL)
@@ -159,7 +174,6 @@ fn main() -> Result<()> {
     let mut fares_archive = ZipArchive::new(Cursor::new(fares_resp))?;
     let mut toc_map: HashMap<String, String> = HashMap::new();
 
-    // Look for the .TOC file (RSPS5045 Section 4.21.2)
     for i in 0..fares_archive.len() {
         let mut file = fares_archive.by_index(i)?;
         if file.name().ends_with(".TOC") {
@@ -167,9 +181,8 @@ fn main() -> Result<()> {
             parse_fares_toc(&mut file, &mut toc_map)?;
         }
     }
-    println!("Loaded {} Agency names from Fares Feed.", toc_map.len());
 
-    // 3. Download and Parse Timetable Feed
+    // 4. Download and Parse Timetable Feed
     println!("Downloading Timetable Feed from {}...", TIMETABLE_URL);
     let tt_resp = client
         .get(TIMETABLE_URL)
@@ -178,21 +191,19 @@ fn main() -> Result<()> {
         .context("Failed to download timetable feed")?
         .bytes()?;
 
-    println!("Downloaded Timetable Feed.");
-
     let mut tt_archive = ZipArchive::new(Cursor::new(tt_resp))?;
     let mut tiploc_map: HashMap<String, ParsedStation> = HashMap::new();
 
-    // 3a. Process Stations (MSN)
+    // 4a. Process Stations (MSN)
     for i in 0..tt_archive.len() {
         let mut file = tt_archive.by_index(i)?;
         if file.name().ends_with(".MSN") {
             println!("Processing Station File: {}", file.name());
-            parse_msn(&mut file, &mut tiploc_map)?;
+            parse_msn(&mut file, &mut tiploc_map, &osm_crs_map)?;
         }
     }
 
-    // 4. Initialize CSV Writers
+    // 5. Initialize CSV Writers
     let mut stops_writer = Writer::from_path(format!("{}/stops.txt", output_dir))?;
     let mut trips_writer = Writer::from_path(format!("{}/trips.txt", output_dir))?;
     let mut st_writer = Writer::from_path(format!("{}/stop_times.txt", output_dir))?;
@@ -214,7 +225,7 @@ fn main() -> Result<()> {
     let mut agencies: HashSet<Agency> = HashSet::new();
     let mut routes: HashMap<String, Route> = HashMap::new();
 
-    // 3b. Process Timetable (MCA)
+    // 4b. Process Timetable (MCA)
     for i in 0..tt_archive.len() {
         let mut file = tt_archive.by_index(i)?;
         if file.name().ends_with(".MCA") {
@@ -247,17 +258,32 @@ fn main() -> Result<()> {
 
 // --- Parsing Logic ---
 
-/// Parse Fares TOC file (RSPS5045 4.21.2) [cite: 804]
-/// Record Type 'T'
+/// Parse OSM PBF to get CRS -> Lat/Lon map
+fn parse_osm_crs(path: &str) -> Result<HashMap<String, (f64, f64)>> {
+    let file = File::open(path)?;
+    let mut reader = OsmPbfReader::new(file);
+    let mut map = HashMap::new();
+
+    for obj in reader.iter().flatten() {
+        if let OsmObj::Node(node) = obj {
+            // Look for ref:crs tag
+            if let Some(crs) = node.tags.get("ref:crs") {
+                // Some CRS might be comma separated or slight variations, taking direct 3-char match usually
+                // The provided PBF is filtered for CRS, so we trust it.
+                // We store the lat/lon directly from the node.
+                map.insert(crs.to_string(), (node.lat(), node.lon()));
+            }
+        }
+    }
+    Ok(map)
+}
+
 fn parse_fares_toc<R: Read>(reader: &mut R, map: &mut HashMap<String, String>) -> Result<()> {
     let buf_reader = BufReader::new(reader);
     for line in buf_reader.lines().flatten() {
         if line.starts_with('T') {
-            // TOC_ID: Pos 2-3 (Length 2) -> Indices 1..3
-            // TOC_NAME: Pos 4-33 (Length 30) -> Indices 3..33
             let id = line.get(1..3).unwrap_or("").trim().to_string();
             let name = line.get(3..33).unwrap_or("").trim().to_string();
-
             if !id.is_empty() && !name.is_empty() {
                 map.insert(id, name);
             }
@@ -266,30 +292,40 @@ fn parse_fares_toc<R: Read>(reader: &mut R, map: &mut HashMap<String, String>) -
     Ok(())
 }
 
-fn parse_msn<R: Read>(reader: &mut R, map: &mut HashMap<String, ParsedStation>) -> Result<()> {
+/// Parse Master Station Names
+/// Prioritizes OSM coordinates if CRS matches, otherwise falls back to OSGB36 conversion
+fn parse_msn<R: Read>(
+    reader: &mut R,
+    map: &mut HashMap<String, ParsedStation>,
+    osm_lookup: &HashMap<String, (f64, f64)>,
+) -> Result<()> {
     let buf_reader = BufReader::new(reader);
     for line in buf_reader.lines().flatten() {
         if line.starts_with('A') {
+            // RSPS5046 Page 33
+            // Name: 6-31 (0-based 5..31)
             let name = line.get(5..31).unwrap_or("").trim().to_string();
+            // TIPLOC: 37-43 (0-based 36..43)
             let tiploc = line.get(36..43).unwrap_or("").trim().to_string();
-            let easting = line
-                .get(52..57)
-                .unwrap_or("0")
-                .trim()
-                .parse::<f64>()
-                .unwrap_or(0.0)
-                * 10.0;
-            let northing = line
-                .get(58..63)
-                .unwrap_or("0")
-                .trim()
-                .parse::<f64>()
-                .unwrap_or(0.0)
-                * 10.0;
+            // CRS Code: 50-52 (0-based 49..52)
+            let crs = line.get(49..52).unwrap_or("").trim().to_string();
 
-            let (lon, lat) = match convert_osgb36_to_ll(easting, northing) {
-                Ok(coords) => coords,
-                Err(_) => (0.0, 0.0),
+            // Easting: 53-57 (52..57)
+            let easting_str = line.get(52..57).unwrap_or("0");
+            // Northing: 59-63 (58..63)
+            let northing_str = line.get(58..63).unwrap_or("0");
+
+            let (lat, lon) = if let Some(coords) = osm_lookup.get(&crs) {
+                // 1. Priority: OSM Match via CRS
+                *coords
+            } else {
+                // 2. Fallback: OSGB36 Conversion
+                let easting = easting_str.trim().parse::<f64>().unwrap_or(0.0) * 100.0;
+                let northing = northing_str.trim().parse::<f64>().unwrap_or(0.0) * 100.0;
+                match convert_osgb36_to_ll(easting, northing) {
+                    Ok(coords) => coords,
+                    Err(_) => (0.0, 0.0),
+                }
             };
 
             if !tiploc.is_empty() {
@@ -371,7 +407,6 @@ fn parse_mca<R: Read>(
                 seq_counter = 1;
             }
             "BX" => {
-                // Get ATOC Code
                 if let Some(trip) = &mut current_trip {
                     let atoc = line.get(11..13).unwrap_or("NR").trim().to_string();
                     if !atoc.is_empty() {
@@ -383,19 +418,20 @@ fn parse_mca<R: Read>(
                 if let Some(trip) = &mut current_trip {
                     let tiploc = line.get(2..9).unwrap_or("").trim();
                     let dep_sched = format_time(line.get(10..15).unwrap_or("00000"));
+                    let dep_pub = line.get(15..19).unwrap_or("0000");
 
+                    // Filter operational stops if necessary, currently strictly filtering on MSN existence
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.origin_name = station.name.clone();
+                        trip.stops.push(StopTime {
+                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            arrival_time: dep_sched.clone(),
+                            departure_time: dep_sched,
+                            stop_id: tiploc.to_string(),
+                            stop_sequence: seq_counter,
+                        });
+                        seq_counter += 1;
                     }
-
-                    trip.stops.push(StopTime {
-                        trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: dep_sched.clone(),
-                        departure_time: dep_sched,
-                        stop_id: tiploc.to_string(),
-                        stop_sequence: seq_counter,
-                    });
-                    seq_counter += 1;
                 }
             }
             "LI" => {
@@ -404,25 +440,24 @@ fn parse_mca<R: Read>(
                     let arr_sched = format_time(line.get(10..15).unwrap_or("00000"));
                     let dep_sched = format_time(line.get(15..20).unwrap_or("00000"));
 
-                    // Public Arrival: Pos 26-29 (Indices 25..29)
                     let pub_arr = line.get(25..29).unwrap_or("0000");
-                    // Public Departure: Pos 30-33 (Indices 29..33)
                     let pub_dep = line.get(29..33).unwrap_or("0000");
 
-                    // GTFS FILTER:
-                    // If both Public Arrival and Departure are 0000, it is an operational stop (passing point/junction).
+                    // Filter operational stops: Must have public times AND exist in station map
                     if pub_arr == "0000" && pub_dep == "0000" {
                         continue;
                     }
 
-                    trip.stops.push(StopTime {
-                        trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: arr_sched,
-                        departure_time: dep_sched,
-                        stop_id: tiploc.to_string(),
-                        stop_sequence: seq_counter,
-                    });
-                    seq_counter += 1;
+                    if tiploc_map.contains_key(tiploc) {
+                        trip.stops.push(StopTime {
+                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            arrival_time: arr_sched,
+                            departure_time: dep_sched,
+                            stop_id: tiploc.to_string(),
+                            stop_sequence: seq_counter,
+                        });
+                        seq_counter += 1;
+                    }
                 }
             }
             "LT" => {
@@ -432,53 +467,51 @@ fn parse_mca<R: Read>(
 
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.dest_name = station.name.clone();
-                    }
+                        trip.stops.push(StopTime {
+                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            arrival_time: arr_sched.clone(),
+                            departure_time: arr_sched,
+                            stop_id: tiploc.to_string(),
+                            stop_sequence: seq_counter,
+                        });
 
-                    trip.stops.push(StopTime {
-                        trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        arrival_time: arr_sched.clone(),
-                        departure_time: arr_sched,
-                        stop_id: tiploc.to_string(),
-                        stop_sequence: seq_counter,
-                    });
+                        // Routes & Agencies
+                        let agency_name = toc_lookup
+                            .get(&trip.atoc_code)
+                            .cloned()
+                            .unwrap_or_else(|| format!("National Rail ({})", trip.atoc_code));
 
-                    // Resolve Agency Name from Fares Data
-                    let agency_name = toc_lookup
-                        .get(&trip.atoc_code)
-                        .cloned()
-                        .unwrap_or_else(|| format!("National Rail ({})", trip.atoc_code));
+                        let route_id = format!("{}_{}", trip.atoc_code, trip.origin_name);
+                        let route_name = format!("{} to {}", trip.origin_name, trip.dest_name);
 
-                    let route_id = format!("{}_{}", trip.atoc_code, trip.origin_name);
-                    let route_name = format!("{} to {}", trip.origin_name, trip.dest_name);
+                        agencies_set.insert(Agency {
+                            agency_id: trip.atoc_code.clone(),
+                            agency_name: agency_name,
+                            agency_url: "http://www.nationalrail.co.uk".to_string(),
+                            agency_timezone: "Europe/London".to_string(),
+                        });
 
-                    agencies_set.insert(Agency {
-                        agency_id: trip.atoc_code.clone(),
-                        agency_name: agency_name,
-                        agency_url: "http://www.nationalrail.co.uk".to_string(),
-                        agency_timezone: "Europe/London".to_string(),
-                    });
+                        routes_map.entry(route_id.clone()).or_insert(Route {
+                            route_id: route_id.clone(),
+                            agency_id: trip.atoc_code.clone(),
+                            route_short_name: trip.atoc_code.clone(),
+                            route_long_name: route_name,
+                            route_type: 2,
+                        });
 
-                    routes_map.entry(route_id.clone()).or_insert(Route {
-                        route_id: route_id.clone(),
-                        agency_id: trip.atoc_code.clone(),
-                        route_short_name: trip.atoc_code.clone(),
-                        route_long_name: route_name,
-                        route_type: 2,
-                    });
+                        trips_w.serialize(Trip {
+                            route_id: route_id,
+                            service_id: format!(
+                                "{}_{}_{}",
+                                trip.uid, trip.date_start, trip.stp_ind
+                            ),
+                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_headsign: trip.dest_name.clone(),
+                            trip_short_name: trip.train_identity.clone(),
+                        })?;
 
-                    trips_w.serialize(Trip {
-                        route_id: route_id,
-                        service_id: format!("{}_{}_{}", trip.uid, trip.date_start, trip.stp_ind),
-                        trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                        trip_headsign: trip.dest_name.clone(),
-                        trip_short_name: trip.train_identity.clone(),
-                    })?;
-
-                    for stop in &trip.stops {
-                        if tiploc_map.contains_key(&stop.stop_id) {
+                        for stop in &trip.stops {
                             st_w.serialize(stop)?;
-                        } else {
-                            println!("Missing Stop: {}", stop.stop_id);
                         }
                     }
                 }

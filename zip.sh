@@ -1,3 +1,3 @@
 cd gtfs_output
-zip -r ../nationalrail-gtfs.zip .
+zip -r ../nationalrailuk.zip .
 cd ..
