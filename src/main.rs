@@ -278,14 +278,14 @@ fn parse_msn<R: Read>(reader: &mut R, map: &mut HashMap<String, ParsedStation>) 
                 .trim()
                 .parse::<f64>()
                 .unwrap_or(0.0)
-                * 100.0;
+                * 10.0;
             let northing = line
                 .get(58..63)
                 .unwrap_or("0")
                 .trim()
                 .parse::<f64>()
                 .unwrap_or(0.0)
-                * 100.0;
+                * 10.0;
 
             let (lon, lat) = match convert_osgb36_to_ll(easting, northing) {
                 Ok(coords) => coords,
