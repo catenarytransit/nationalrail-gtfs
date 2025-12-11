@@ -102,11 +102,11 @@ struct ParsedStation {
 }
 
 struct TripState {
-    _uid: String,
+    uid: String,
     date_start: String,
     date_end: String,
     days_run: String,
-    _stp_ind: String,
+    stp_ind: String,
     atoc_code: String,
     train_identity: String,
     origin_name: String,
@@ -261,8 +261,8 @@ fn main() -> Result<()> {
     
     // Maps for consolidating identical trips and calendars
     let mut trip_service_to_id: HashMap<TripServiceSignature, String> = HashMap::new();
+    let mut uid_usage_count: HashMap<String, u32> = HashMap::new();
     let mut calendar_signature_to_id: HashMap<CalendarSignature, String> = HashMap::new();
-    let mut trip_counter = 0u32;
     let mut service_counter = 0u32;
 
     // 4b. Process Timetable (MCA)
@@ -281,8 +281,8 @@ fn main() -> Result<()> {
                 &mut routes,
                 &toc_map,
                 &mut trip_service_to_id,
+                &mut uid_usage_count,
                 &mut calendar_signature_to_id,
-                &mut trip_counter,
                 &mut service_counter,
             )?;
         }
@@ -290,7 +290,7 @@ fn main() -> Result<()> {
 
     // Print consolidation statistics
     println!("Consolidation Summary:");
-    println!("  Unique trip patterns: {}", trip_counter);
+    println!("  Unique trip+service combinations: {}", trip_service_to_id.len());
     println!("  Unique service calendars: {}", service_counter);
     println!("  Total routes: {}", routes.len());
     println!("  Total agencies: {}", agencies.len());
@@ -406,8 +406,8 @@ fn parse_mca<R: Read>(
     routes_map: &mut HashMap<String, Route>,
     toc_lookup: &HashMap<String, String>,
     trip_service_to_id: &mut HashMap<TripServiceSignature, String>,
+    uid_usage_count: &mut HashMap<String, u32>,
     calendar_signature_to_id: &mut HashMap<CalendarSignature, String>,
-    trip_counter: &mut u32,
     service_counter: &mut u32,
 ) -> Result<()> {
     let buf_reader = BufReader::new(reader);
@@ -435,11 +435,11 @@ fn parse_mca<R: Read>(
                 }
 
                 current_trip = Some(TripState {
-                    _uid: uid.clone(),
+                    uid: uid.clone(),
                     date_start: d_start.to_string(),
                     date_end: d_end.to_string(),
                     days_run: days.to_string(),
-                    _stp_ind: stp.to_string(),
+                    stp_ind: stp.to_string(),
                     atoc_code: "NR".to_string(),
                     train_identity: train_id,
                     origin_name: String::new(),
@@ -619,8 +619,18 @@ fn parse_mca<R: Read>(
 
                         // Only write this trip+service combination if we haven't seen it before
                         if !trip_service_to_id.contains_key(&trip_service_sig) {
-                            let new_trip_id = format!("TRIP{}", trip_counter);
-                            *trip_counter += 1;
+                            // Generate trip_id based on UID
+                            let base_uid = trip.uid.clone();
+                            let usage_count = uid_usage_count.entry(base_uid.clone()).or_insert(0);
+                            
+                            let new_trip_id = if *usage_count == 0 {
+                                // First usage - use UID directly
+                                base_uid.clone()
+                            } else {
+                                // Subsequent usage - append date and STP indicator
+                                format!("{}_{}_{}", base_uid, trip.date_start, trip.stp_ind)
+                            };
+                            *usage_count += 1;
                             
                             trip_service_to_id.insert(trip_service_sig, new_trip_id.clone());
                             
