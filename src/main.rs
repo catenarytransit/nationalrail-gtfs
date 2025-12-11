@@ -58,7 +58,7 @@ struct Trip {
     trip_short_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct StopTime {
     trip_id: String,
     arrival_time: String,
@@ -102,14 +102,39 @@ struct ParsedStation {
 }
 
 struct TripState {
-    uid: String,
+    _uid: String,
     date_start: String,
-    stp_ind: String,
+    date_end: String,
+    days_run: String,
+    _stp_ind: String,
     atoc_code: String,
     train_identity: String,
     origin_name: String,
     dest_name: String,
     stops: Vec<StopTime>,
+}
+
+// Signature for identifying identical trip patterns
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TripSignature {
+    route_id: String,
+    stop_pattern: Vec<(String, String, String)>, // (stop_id, arrival_time, departure_time)
+    headsign: String,
+    train_identity: String,
+}
+
+// Signature for identifying identical calendar entries
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CalendarSignature {
+    monday: u8,
+    tuesday: u8,
+    wednesday: u8,
+    thursday: u8,
+    friday: u8,
+    saturday: u8,
+    sunday: u8,
+    start_date: String,
+    end_date: String,
 }
 
 // --- Authentication ---
@@ -226,6 +251,12 @@ fn main() -> Result<()> {
 
     let mut agencies: HashSet<Agency> = HashSet::new();
     let mut routes: HashMap<String, Route> = HashMap::new();
+    
+    // Maps for consolidating identical trips and calendars
+    let mut trip_signature_to_id: HashMap<TripSignature, String> = HashMap::new();
+    let mut calendar_signature_to_id: HashMap<CalendarSignature, String> = HashMap::new();
+    let mut trip_counter = 0u32;
+    let mut service_counter = 0u32;
 
     // 4b. Process Timetable (MCA)
     for i in 0..tt_archive.len() {
@@ -242,6 +273,10 @@ fn main() -> Result<()> {
                 &mut agencies,
                 &mut routes,
                 &toc_map,
+                &mut trip_signature_to_id,
+                &mut calendar_signature_to_id,
+                &mut trip_counter,
+                &mut service_counter,
             )?;
         }
     }
@@ -356,6 +391,10 @@ fn parse_mca<R: Read>(
     agencies_set: &mut HashSet<Agency>,
     routes_map: &mut HashMap<String, Route>,
     toc_lookup: &HashMap<String, String>,
+    trip_signature_to_id: &mut HashMap<TripSignature, String>,
+    calendar_signature_to_id: &mut HashMap<CalendarSignature, String>,
+    trip_counter: &mut u32,
+    service_counter: &mut u32,
 ) -> Result<()> {
     let buf_reader = BufReader::new(reader);
     let mut current_trip: Option<TripState> = None;
@@ -382,9 +421,11 @@ fn parse_mca<R: Read>(
                 }
 
                 current_trip = Some(TripState {
-                    uid: uid.clone(),
+                    _uid: uid.clone(),
                     date_start: d_start.to_string(),
-                    stp_ind: stp.to_string(),
+                    date_end: d_end.to_string(),
+                    days_run: days.to_string(),
+                    _stp_ind: stp.to_string(),
                     atoc_code: "NR".to_string(),
                     train_identity: train_id,
                     origin_name: String::new(),
@@ -392,20 +433,6 @@ fn parse_mca<R: Read>(
                     stops: Vec::new(),
                 });
 
-                let service_id = format!("{}_{}_{}", uid, d_start, stp);
-                let d_vec: Vec<u8> = days.chars().map(|c| if c == '1' { 1 } else { 0 }).collect();
-                cal_w.serialize(Calendar {
-                    service_id,
-                    monday: *d_vec.get(0).unwrap_or(&0),
-                    tuesday: *d_vec.get(1).unwrap_or(&0),
-                    wednesday: *d_vec.get(2).unwrap_or(&0),
-                    thursday: *d_vec.get(3).unwrap_or(&0),
-                    friday: *d_vec.get(4).unwrap_or(&0),
-                    saturday: *d_vec.get(5).unwrap_or(&0),
-                    sunday: *d_vec.get(6).unwrap_or(&0),
-                    start_date: format!("20{}", d_start),
-                    end_date: format!("20{}", d_end),
-                })?;
                 seq_counter = 1;
             }
             "BX" => {
@@ -420,13 +447,13 @@ fn parse_mca<R: Read>(
                 if let Some(trip) = &mut current_trip {
                     let tiploc = line.get(2..9).unwrap_or("").trim();
                     let dep_sched = format_time(line.get(10..15).unwrap_or("00000"));
-                    let dep_pub = line.get(15..19).unwrap_or("0000");
+                    let _dep_pub = line.get(15..19).unwrap_or("0000");
 
                     // Filter operational stops if necessary, currently strictly filtering on MSN existence
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.origin_name = station.name.clone();
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: "temp".to_string(),
                             arrival_time: dep_sched.clone(),
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -452,7 +479,7 @@ fn parse_mca<R: Read>(
 
                     if tiploc_map.contains_key(tiploc) {
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: "temp".to_string(),
                             arrival_time: arr_sched,
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -469,8 +496,11 @@ fn parse_mca<R: Read>(
 
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.dest_name = station.name.clone();
+                        
+                        // Temporarily use a placeholder trip_id for building the stop pattern
+                        let placeholder_trip_id = "temp".to_string();
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: placeholder_trip_id.clone(),
                             arrival_time: arr_sched.clone(),
                             departure_time: arr_sched,
                             stop_id: tiploc.to_string(),
@@ -517,20 +547,82 @@ fn parse_mca<R: Read>(
                             route_text_color,
                         });
 
-                        trips_w.serialize(Trip {
-                            route_id: route_id,
-                            service_id: format!(
-                                "{}_{}_{}",
-                                trip.uid, trip.date_start, trip.stp_ind
-                            ),
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
-                            trip_headsign: trip.dest_name.clone(),
-                            trip_short_name: trip.train_identity.clone(),
-                        })?;
+                        // Create calendar signature and get or create service_id
+                        let d_vec: Vec<u8> = trip.days_run.chars().map(|c| if c == '1' { 1 } else { 0 }).collect();
+                        let cal_sig = CalendarSignature {
+                            monday: *d_vec.get(0).unwrap_or(&0),
+                            tuesday: *d_vec.get(1).unwrap_or(&0),
+                            wednesday: *d_vec.get(2).unwrap_or(&0),
+                            thursday: *d_vec.get(3).unwrap_or(&0),
+                            friday: *d_vec.get(4).unwrap_or(&0),
+                            saturday: *d_vec.get(5).unwrap_or(&0),
+                            sunday: *d_vec.get(6).unwrap_or(&0),
+                            start_date: format!("20{}", trip.date_start),
+                            end_date: format!("20{}", trip.date_end),
+                        };
 
-                        for stop in &trip.stops {
-                            st_w.serialize(stop)?;
-                        }
+                        let service_id = calendar_signature_to_id
+                            .entry(cal_sig.clone())
+                            .or_insert_with(|| {
+                                let new_id = format!("SVC{}", service_counter);
+                                *service_counter += 1;
+                                
+                                // Write the calendar entry for this new service
+                                cal_w.serialize(Calendar {
+                                    service_id: new_id.clone(),
+                                    monday: cal_sig.monday,
+                                    tuesday: cal_sig.tuesday,
+                                    wednesday: cal_sig.wednesday,
+                                    thursday: cal_sig.thursday,
+                                    friday: cal_sig.friday,
+                                    saturday: cal_sig.saturday,
+                                    sunday: cal_sig.sunday,
+                                    start_date: cal_sig.start_date.clone(),
+                                    end_date: cal_sig.end_date.clone(),
+                                }).ok();
+                                
+                                new_id
+                            })
+                            .clone();
+
+                        // Create trip signature (with normalized stop pattern)
+                        let stop_pattern: Vec<(String, String, String)> = trip.stops.iter()
+                            .map(|st| (st.stop_id.clone(), st.arrival_time.clone(), st.departure_time.clone()))
+                            .collect();
+                        
+                        let trip_sig = TripSignature {
+                            route_id: route_id.clone(),
+                            stop_pattern,
+                            headsign: trip.dest_name.clone(),
+                            train_identity: trip.train_identity.clone(),
+                        };
+
+                        // Get or create trip_id based on signature
+                        let _trip_id = trip_signature_to_id
+                            .entry(trip_sig.clone())
+                            .or_insert_with(|| {
+                                let new_trip_id = format!("TRIP{}", trip_counter);
+                                *trip_counter += 1;
+                                
+                                // Write the trip entry for this new trip pattern
+                                trips_w.serialize(Trip {
+                                    route_id: route_id.clone(),
+                                    service_id: service_id.clone(),
+                                    trip_id: new_trip_id.clone(),
+                                    trip_headsign: trip.dest_name.clone(),
+                                    trip_short_name: trip.train_identity.clone(),
+                                }).ok();
+                                
+                                // Write stop_times for this new trip pattern
+                                for stop in &trip.stops {
+                                    let mut updated_stop = stop.clone();
+                                    updated_stop.trip_id = new_trip_id.clone();
+                                    st_w.serialize(&updated_stop).ok();
+                                }
+                                
+                                new_trip_id
+                            })
+                            .clone();
                     }
                 }
             }
