@@ -14,6 +14,9 @@ const TIMETABLE_URL: &str = "https://opendata.nationalrail.co.uk/api/staticfeeds
 const FARES_URL: &str = "https://opendata.nationalrail.co.uk/api/staticfeeds/2.0/fares";
 const OSM_CRS_URL: &str = "https://github.com/catenarytransit/osm-filter/releases/download/latest/crs-networkrail.osm.pbf";
 
+// Placeholder for trip_id during stop collection
+const PLACEHOLDER_TRIP_ID: &str = "PLACEHOLDER";
+
 // --- Data Structures ---
 
 #[derive(Deserialize)]
@@ -467,7 +470,7 @@ fn parse_mca<R: Read>(
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.origin_name = station.name.clone();
                         trip.stops.push(StopTime {
-                            trip_id: "temp".to_string(),
+                            trip_id: PLACEHOLDER_TRIP_ID.to_string(),
                             arrival_time: dep_sched.clone(),
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -493,7 +496,7 @@ fn parse_mca<R: Read>(
 
                     if tiploc_map.contains_key(tiploc) {
                         trip.stops.push(StopTime {
-                            trip_id: "temp".to_string(),
+                            trip_id: PLACEHOLDER_TRIP_ID.to_string(),
                             arrival_time: arr_sched,
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -511,10 +514,9 @@ fn parse_mca<R: Read>(
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.dest_name = station.name.clone();
                         
-                        // Temporarily use a placeholder trip_id for building the stop pattern
-                        let placeholder_trip_id = "temp".to_string();
+                        // Use placeholder trip_id for building the stop pattern
                         trip.stops.push(StopTime {
-                            trip_id: placeholder_trip_id.clone(),
+                            trip_id: PLACEHOLDER_TRIP_ID.to_string(),
                             arrival_time: arr_sched.clone(),
                             departure_time: arr_sched,
                             stop_id: tiploc.to_string(),
@@ -575,29 +577,30 @@ fn parse_mca<R: Read>(
                             end_date: format!("20{}", trip.date_end),
                         };
 
-                        let service_id = calendar_signature_to_id
-                            .entry(cal_sig.clone())
-                            .or_insert_with(|| {
-                                let new_id = format!("SVC{}", service_counter);
-                                *service_counter += 1;
-                                
-                                // Write the calendar entry for this new service
-                                cal_w.serialize(Calendar {
-                                    service_id: new_id.clone(),
-                                    monday: cal_sig.monday,
-                                    tuesday: cal_sig.tuesday,
-                                    wednesday: cal_sig.wednesday,
-                                    thursday: cal_sig.thursday,
-                                    friday: cal_sig.friday,
-                                    saturday: cal_sig.saturday,
-                                    sunday: cal_sig.sunday,
-                                    start_date: cal_sig.start_date.clone(),
-                                    end_date: cal_sig.end_date.clone(),
-                                }).ok();
-                                
-                                new_id
-                            })
-                            .clone();
+                        // Check if we've seen this calendar signature before
+                        let service_id = if let Some(existing_id) = calendar_signature_to_id.get(&cal_sig) {
+                            existing_id.clone()
+                        } else {
+                            let new_id = format!("SVC{}", service_counter);
+                            *service_counter += 1;
+                            
+                            // Write the calendar entry for this new service
+                            cal_w.serialize(Calendar {
+                                service_id: new_id.clone(),
+                                monday: cal_sig.monday,
+                                tuesday: cal_sig.tuesday,
+                                wednesday: cal_sig.wednesday,
+                                thursday: cal_sig.thursday,
+                                friday: cal_sig.friday,
+                                saturday: cal_sig.saturday,
+                                sunday: cal_sig.sunday,
+                                start_date: cal_sig.start_date.clone(),
+                                end_date: cal_sig.end_date.clone(),
+                            })?;
+                            
+                            calendar_signature_to_id.insert(cal_sig, new_id.clone());
+                            new_id
+                        };
 
                         // Create trip signature (with normalized stop pattern)
                         let stop_pattern: Vec<(String, String, String)> = trip.stops.iter()
