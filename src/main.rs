@@ -123,6 +123,13 @@ struct TripSignature {
     train_identity: String,
 }
 
+// Composite signature for trip+service combination (for deduplication)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TripServiceSignature {
+    trip_sig: TripSignature,
+    service_id: String,
+}
+
 // Signature for identifying identical calendar entries
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CalendarSignature {
@@ -253,7 +260,7 @@ fn main() -> Result<()> {
     let mut routes: HashMap<String, Route> = HashMap::new();
     
     // Maps for consolidating identical trips and calendars
-    let mut trip_signature_to_id: HashMap<TripSignature, String> = HashMap::new();
+    let mut trip_service_to_id: HashMap<TripServiceSignature, String> = HashMap::new();
     let mut calendar_signature_to_id: HashMap<CalendarSignature, String> = HashMap::new();
     let mut trip_counter = 0u32;
     let mut service_counter = 0u32;
@@ -273,13 +280,20 @@ fn main() -> Result<()> {
                 &mut agencies,
                 &mut routes,
                 &toc_map,
-                &mut trip_signature_to_id,
+                &mut trip_service_to_id,
                 &mut calendar_signature_to_id,
                 &mut trip_counter,
                 &mut service_counter,
             )?;
         }
     }
+
+    // Print consolidation statistics
+    println!("Consolidation Summary:");
+    println!("  Unique trip patterns: {}", trip_counter);
+    println!("  Unique service calendars: {}", service_counter);
+    println!("  Total routes: {}", routes.len());
+    println!("  Total agencies: {}", agencies.len());
 
     // Write aggregated Agencies and Routes
     for agency in agencies {
@@ -391,7 +405,7 @@ fn parse_mca<R: Read>(
     agencies_set: &mut HashSet<Agency>,
     routes_map: &mut HashMap<String, Route>,
     toc_lookup: &HashMap<String, String>,
-    trip_signature_to_id: &mut HashMap<TripSignature, String>,
+    trip_service_to_id: &mut HashMap<TripServiceSignature, String>,
     calendar_signature_to_id: &mut HashMap<CalendarSignature, String>,
     trip_counter: &mut u32,
     service_counter: &mut u32,
@@ -597,32 +611,35 @@ fn parse_mca<R: Read>(
                             train_identity: trip.train_identity.clone(),
                         };
 
-                        // Get or create trip_id based on signature
-                        let _trip_id = trip_signature_to_id
-                            .entry(trip_sig.clone())
-                            .or_insert_with(|| {
-                                let new_trip_id = format!("TRIP{}", trip_counter);
-                                *trip_counter += 1;
-                                
-                                // Write the trip entry for this new trip pattern
-                                trips_w.serialize(Trip {
-                                    route_id: route_id.clone(),
-                                    service_id: service_id.clone(),
-                                    trip_id: new_trip_id.clone(),
-                                    trip_headsign: trip.dest_name.clone(),
-                                    trip_short_name: trip.train_identity.clone(),
-                                }).ok();
-                                
-                                // Write stop_times for this new trip pattern
-                                for stop in &trip.stops {
-                                    let mut updated_stop = stop.clone();
-                                    updated_stop.trip_id = new_trip_id.clone();
-                                    st_w.serialize(&updated_stop).ok();
-                                }
-                                
-                                new_trip_id
-                            })
-                            .clone();
+                        // Create composite signature combining trip pattern and service
+                        let trip_service_sig = TripServiceSignature {
+                            trip_sig,
+                            service_id: service_id.clone(),
+                        };
+
+                        // Only write this trip+service combination if we haven't seen it before
+                        if !trip_service_to_id.contains_key(&trip_service_sig) {
+                            let new_trip_id = format!("TRIP{}", trip_counter);
+                            *trip_counter += 1;
+                            
+                            trip_service_to_id.insert(trip_service_sig, new_trip_id.clone());
+                            
+                            // Write the trip entry
+                            trips_w.serialize(Trip {
+                                route_id: route_id.clone(),
+                                service_id: service_id.clone(),
+                                trip_id: new_trip_id.clone(),
+                                trip_headsign: trip.dest_name.clone(),
+                                trip_short_name: trip.train_identity.clone(),
+                            })?;
+                            
+                            // Write stop_times for this trip
+                            for stop in &trip.stops {
+                                let mut updated_stop = stop.clone();
+                                updated_stop.trip_id = new_trip_id.clone();
+                                st_w.serialize(&updated_stop)?;
+                            }
+                        }
                     }
                 }
             }
