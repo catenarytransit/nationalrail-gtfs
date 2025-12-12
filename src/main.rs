@@ -485,19 +485,43 @@ fn parse_mca<R: Read>(
 
                         let mut route_id = format!("{}_{}", trip.atoc_code, trip.origin_name);
                         let mut route_name = format!("{} to {}", trip.origin_name, trip.dest_name);
-                        let mut route_short_name = trip.atoc_code.clone();
+                        let mut route_short_name = "".to_string();
                         let mut route_color = "".to_string(); // Default (or undefined)
                         let mut route_text_color = "000000".to_string(); // Default Black
+
+                        if trip.atoc_code == "XR" {
+                            route_id = "XR-ELIZABETH".to_string();
+                            route_name = "Elizabeth line".to_string();
+                            route_color = "6950a1".to_string(); // TfL Purple
+                            route_text_color = "FFFFFF".to_string();
+                        }
 
                         if trip.atoc_code == "LO" {
                             let (name, id, color) = get_lo_line_details(&trip.stops, tiploc_map);
                             if !name.is_empty() {
                                 route_id = id;
                                 route_name = name;
-                                route_short_name = "LO".to_string();
                                 route_color = color;
                                 route_text_color = "FFFFFF".to_string();
                             }
+                        }
+
+                        if trip.atoc_code == "GX" {
+                            route_id = "GX-GATWICK".to_string();
+                            route_name = "Gatwick Express".to_string();
+                            route_color = "DC0A1E".to_string();
+                            route_text_color = "000000".to_string();
+                        }
+
+                        if trip.atoc_code == "HX" {
+                            route_id = "HX-HEATHROW".to_string();
+                            route_name = "Heathrow Express".to_string();
+                        }
+
+                        if trip.atoc_code == "ME" {
+                            let (name, id) = get_me_line_details(&trip.stops, tiploc_map);
+                            route_id = id;
+                            route_name = name;
                         }
 
                         agencies_set.insert(Agency {
@@ -637,4 +661,139 @@ fn get_lo_line_details(
         "LO-GENERIC".to_string(),
         "E66A1F".to_string(),
     )
+}
+
+fn get_me_line_details(
+    stops: &[StopTime],
+    tiploc_map: &HashMap<String, ParsedStation>,
+) -> (String, String) {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut tiplocs: HashSet<String> = HashSet::new();
+
+    for stop in stops {
+        tiplocs.insert(stop.stop_id.clone());
+        if let Some(station) = tiploc_map.get(&stop.stop_id) {
+            names.insert(station.name.to_uppercase());
+        }
+    }
+
+    let has_name = |s: &str| -> bool {
+        names.iter().any(|n| n.contains(&s.to_uppercase()))
+    };
+    
+    let has_loc = |s: &str| -> bool {
+        tiplocs.contains(s)
+    };
+
+    // Wirral Line
+    // "Ellesmere port station has the stop id ELSMPRT"
+    // "west kirby has WKIRBY"
+    // "New brighton is NBTN"
+    if has_loc("ELSMPRT") || has_loc("WKIRBY") || has_loc("NBTN") || has_name("CHESTER") {
+        return ("Wirral line".to_string(), "ME-WIRRAL".to_string());
+    }
+
+    // Northern Line
+    // Southport, Ormskirk, Kirkby, Hunts Cross
+    if has_name("SOUTHPORT") || has_name("ORMSKIRK") || has_name("KIRKBY") || has_name("HUNTS CROSS") {
+        return ("Northern line".to_string(), "ME-NORTHERN".to_string());
+    }
+
+    // City Line
+    // Common stops: Huyton, St Helens, etc. (Heuristic fallback)
+    if has_name("HUYTON") || has_name("ST HELENS") || has_name("NEWTON-LE-WILLOWS") || has_name("LIVERPOOL LIME STREET") {
+         return ("City line".to_string(), "ME-CITY".to_string());
+    }
+
+    // Default
+    ("Merseyrail".to_string(), "ME-GENERIC".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merseyrail_wirral_line() {
+        let mut tiploc_map = HashMap::new();
+        tiploc_map.insert("WKIRBY".to_string(), ParsedStation {
+            tiploc: "WKIRBY".to_string(),
+            name: "West Kirby".to_string(),
+            lat: 0.0,
+            lon: 0.0,
+        });
+
+        let stops = vec![
+            StopTime {
+                trip_id: "t1".to_string(),
+                arrival_time: "00:00".to_string(),
+                departure_time: "00:00".to_string(),
+                stop_id: "WKIRBY".to_string(),
+                stop_sequence: 1,
+            }
+        ];
+
+        let (name, id) = get_me_line_details(&stops, &tiploc_map);
+        assert_eq!(name, "Wirral line");
+        assert_eq!(id, "ME-WIRRAL");
+    }
+
+    #[test]
+    fn test_merseyrail_northern_line() {
+        let mut tiploc_map = HashMap::new();
+        tiploc_map.insert("SOUTHPORT".to_string(), ParsedStation {
+            tiploc: "SOUTHPORT".to_string(),
+            name: "Southport".to_string(),
+            lat: 0.0,
+            lon: 0.0,
+        });
+
+        let stops = vec![
+            StopTime {
+                trip_id: "t2".to_string(),
+                arrival_time: "00:00".to_string(),
+                departure_time: "00:00".to_string(),
+                stop_id: "SOUTHPORT".to_string(),
+                stop_sequence: 1,
+            }
+        ];
+
+        let (name, id) = get_me_line_details(&stops, &tiploc_map);
+        assert_eq!(name, "Northern line");
+        assert_eq!(id, "ME-NORTHERN");
+    }
+
+    #[test]
+    fn test_merseyrail_city_line() {
+        let mut tiploc_map = HashMap::new();
+        tiploc_map.insert("HUYTON".to_string(), ParsedStation {
+            tiploc: "HUYTON".to_string(),
+            name: "Huyton".to_string(),
+            lat: 0.0,
+            lon: 0.0,
+        });
+
+        let stops = vec![
+            StopTime {
+                trip_id: "t3".to_string(),
+                arrival_time: "00:00".to_string(),
+                departure_time: "00:00".to_string(),
+                stop_id: "HUYTON".to_string(),
+                stop_sequence: 1,
+            }
+        ];
+
+        let (name, id) = get_me_line_details(&stops, &tiploc_map);
+        assert_eq!(name, "City line");
+        assert_eq!(id, "ME-CITY");
+    }
+
+    #[test]
+    fn test_merseyrail_generic() {
+        let tiploc_map = HashMap::new();
+        let stops = vec![];
+        let (name, id) = get_me_line_details(&stops, &tiploc_map);
+        assert_eq!(name, "Merseyrail");
+        assert_eq!(id, "ME-GENERIC");
+    }
 }
