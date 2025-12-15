@@ -500,6 +500,11 @@ fn parse_mca<R: Read>(
                             }
                         }
 
+                        if trip.atoc_code == "GW" {
+                            route_color = "0a493e".to_string();
+                            route_text_color = "FFFFFF".to_string();
+                        }
+
                         agencies_set.insert(Agency {
                             agency_id: trip.atoc_code.clone(),
                             agency_name: agency_name,
