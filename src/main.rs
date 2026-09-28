@@ -426,7 +426,7 @@ fn parse_mca<R: Read>(
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.origin_name = station.name.clone();
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: format!("{}_{}_{}", trip.uid, trip.date_start, trip.stp_ind),
                             arrival_time: dep_sched.clone(),
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -452,7 +452,7 @@ fn parse_mca<R: Read>(
 
                     if tiploc_map.contains_key(tiploc) {
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: format!("{}_{}_{}", trip.uid, trip.date_start, trip.stp_ind),
                             arrival_time: arr_sched,
                             departure_time: dep_sched,
                             stop_id: tiploc.to_string(),
@@ -470,7 +470,7 @@ fn parse_mca<R: Read>(
                     if let Some(station) = tiploc_map.get(tiploc) {
                         trip.dest_name = station.name.clone();
                         trip.stops.push(StopTime {
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: format!("{}_{}_{}", trip.uid, trip.date_start, trip.stp_ind),
                             arrival_time: arr_sched.clone(),
                             departure_time: arr_sched,
                             stop_id: tiploc.to_string(),
@@ -579,7 +579,7 @@ fn parse_mca<R: Read>(
                                 "{}_{}_{}",
                                 trip.uid, trip.date_start, trip.stp_ind
                             ),
-                            trip_id: format!("{}_{}", trip.uid, trip.date_start),
+                            trip_id: format!("{}_{}_{}", trip.uid, trip.date_start, trip.stp_ind),
                             trip_headsign: trip.dest_name.clone(),
                             trip_short_name: trip.train_identity.clone(),
                         })?;
