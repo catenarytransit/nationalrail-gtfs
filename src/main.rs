@@ -477,6 +477,11 @@ fn parse_mca<R: Read>(
                             stop_sequence: seq_counter,
                         });
 
+                        // GTFS stop_times are relative to the trip's service day, not
+                        // wall-clock dates. Once a trip crosses midnight, subsequent
+                        // clock times must use extended hours (24:xx:xx, 25:xx:xx, ...).
+                        normalize_stop_times_across_midnight(&mut trip.stops);
+
                         // Routes & Agencies
                         let agency_name = toc_lookup
                             .get(&trip.atoc_code)
@@ -613,6 +618,58 @@ fn format_time(raw: &str) -> String {
     }
 }
 
+
+const SECONDS_PER_DAY: u32 = 24 * 60 * 60;
+
+fn gtfs_time_to_seconds(time: &str) -> Option<u32> {
+    let mut parts = time.split(':');
+    let hours = parts.next()?.parse::<u32>().ok()?;
+    let minutes = parts.next()?.parse::<u32>().ok()?;
+    let seconds = parts.next()?.parse::<u32>().ok()?;
+
+    if parts.next().is_some() || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+
+    Some(hours * 60 * 60 + minutes * 60 + seconds)
+}
+
+fn seconds_to_gtfs_time(total_seconds: u32) -> String {
+    let hours = total_seconds / (60 * 60);
+    let minutes = (total_seconds % (60 * 60)) / 60;
+    let seconds = total_seconds % 60;
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+/// Convert wall-clock CIF times into monotonically increasing GTFS service-day times.
+///
+/// CIF repeats the clock after midnight (for example 23:59 -> 00:02), while GTFS
+/// represents the latter as 24:02:00 when it belongs to the same trip/service day.
+/// A trip that genuinely starts at 00:02 remains 00:02:00 because there is no earlier
+/// event in that trip forcing a day rollover.
+fn normalize_stop_times_across_midnight(stops: &mut [StopTime]) {
+    let mut previous_seconds: Option<u32> = None;
+
+    for stop in stops {
+        for time in [&mut stop.arrival_time, &mut stop.departure_time] {
+            let Some(mut current_seconds) = gtfs_time_to_seconds(time) else {
+                continue;
+            };
+
+            if let Some(previous) = previous_seconds {
+                if current_seconds < previous {
+                    let days_to_add =
+                        (previous - current_seconds + SECONDS_PER_DAY - 1) / SECONDS_PER_DAY;
+                    current_seconds += days_to_add * SECONDS_PER_DAY;
+                }
+            }
+
+            *time = seconds_to_gtfs_time(current_seconds);
+            previous_seconds = Some(current_seconds);
+        }
+    }
+}
+
 fn get_lo_line_details(
     stops: &[StopTime],
     tiploc_map: &HashMap<String, ParsedStation>,
@@ -743,6 +800,50 @@ fn get_me_line_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    fn make_stop(sequence: u32, arrival: &str, departure: &str) -> StopTime {
+        StopTime {
+            trip_id: "test-trip".to_string(),
+            arrival_time: arrival.to_string(),
+            departure_time: departure.to_string(),
+            stop_id: format!("STOP{}", sequence),
+            stop_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn test_midnight_rollover_uses_extended_gtfs_hours() {
+        let mut stops = vec![
+            make_stop(1, "23:55:00", "23:55:00"),
+            make_stop(2, "23:59:00", "00:02:00"),
+            make_stop(3, "00:10:00", "00:10:00"),
+        ];
+
+        normalize_stop_times_across_midnight(&mut stops);
+
+        assert_eq!(stops[0].arrival_time, "23:55:00");
+        assert_eq!(stops[0].departure_time, "23:55:00");
+        assert_eq!(stops[1].arrival_time, "23:59:00");
+        assert_eq!(stops[1].departure_time, "24:02:00");
+        assert_eq!(stops[2].arrival_time, "24:10:00");
+        assert_eq!(stops[2].departure_time, "24:10:00");
+    }
+
+    #[test]
+    fn test_early_morning_trip_does_not_get_false_day_rollover() {
+        let mut stops = vec![
+            make_stop(1, "00:02:00", "00:02:00"),
+            make_stop(2, "00:10:00", "00:11:00"),
+        ];
+
+        normalize_stop_times_across_midnight(&mut stops);
+
+        assert_eq!(stops[0].arrival_time, "00:02:00");
+        assert_eq!(stops[0].departure_time, "00:02:00");
+        assert_eq!(stops[1].arrival_time, "00:10:00");
+        assert_eq!(stops[1].departure_time, "00:11:00");
+    }
 
     #[test]
     fn test_merseyrail_wirral_line() {
