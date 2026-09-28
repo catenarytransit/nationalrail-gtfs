@@ -618,7 +618,6 @@ fn format_time(raw: &str) -> String {
     }
 }
 
-
 const SECONDS_PER_DAY: u32 = 24 * 60 * 60;
 
 fn gtfs_time_to_seconds(time: &str) -> Option<u32> {
@@ -800,7 +799,6 @@ fn get_me_line_details(
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     fn make_stop(sequence: u32, arrival: &str, departure: &str) -> StopTime {
         StopTime {
